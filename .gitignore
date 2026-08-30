@@ -1,0 +1,21 @@
+# PlatformIO and generated firmware
+.pio/
+*.bin
+*.elf
+*.map
+
+# Local editor files
+.vscode/
+
+# Local credentials and deployment configuration
+include/secrets.h
+
+# Python
+.pytest_cache/
+__pycache__/
+*.pyc
+.venv/
+
+# OS metadata
+.DS_Store
+Thumbs.db
