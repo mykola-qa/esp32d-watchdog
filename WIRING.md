@@ -124,8 +124,9 @@ Logic **DC+** = ESP32 3V3. **IN** = D26. **DC−** = GND.
 ## What the firmware does
 
 Ping the configured `PING_HOST` every 15 s, pulse after ~5 min down.
-HA on the configured port down **and** SSH with no `SSH-` banner for ~5 min → pulse.
-HA down but SSH banner still works (typical update) → no pulse.
+HA on the configured port down **and** host health HTTP on port 8081 down for
+~5 min → pulse.
+HA down but host health still returns HTTP 2xx/3xx (typical update) → no pulse.
 
 ## WiFi logs (no USB)
 

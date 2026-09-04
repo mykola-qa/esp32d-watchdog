@@ -3,7 +3,7 @@ import pytest
 
 @pytest.mark.hardware
 def test_boot_banner_and_no_bench(dut):
-    assert any("esp32d-watchdog  ping + HA + SSH banner" in ln for ln in dut.lines)
+    assert any("esp32d-watchdog  ping + HA + host health" in ln for ln in dut.lines)
     assert not any("BENCH: toggling" in ln for ln in dut.lines)
 
 

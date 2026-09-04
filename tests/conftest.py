@@ -90,7 +90,7 @@ class WatchdogSerial:
 
     def wait_boot(self) -> None:
         self.reset_esp()
-        self.wait_for(r"esp32d-watchdog  ping \+ HA \+ SSH banner", BOOT_TIMEOUT_S)
+        self.wait_for(r"esp32d-watchdog  ping \+ HA \+ host health", BOOT_TIMEOUT_S)
         self.is_qa_fast = any("BUILD QA_FAST" in ln for ln in self.lines)
         self.wait_for(r"State: Monitor", BOOT_TIMEOUT_S)
 

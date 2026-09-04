@@ -3,7 +3,6 @@
 #include <HTTPClient.h>
 #include <ESP32Ping.h>
 #include <esp_task_wdt.h>
-#include <cstring>
 
 #include "secrets.h"
 #include "config.h"
@@ -25,7 +24,7 @@ static uint32_t lastWifiAttemptMs = 0;
 #ifdef QA_FAST
 static bool injectPingFail = false;
 static bool injectHaFail = false;
-static bool injectSshFail = false;
+static bool injectHealthFail = false;
 static bool injectWifiDown = false;
 #endif
 
@@ -88,12 +87,12 @@ static void onCommand(char c) {
   } else if (c == 'H') {
     injectHaFail = false;
     Log.println("QA: HA inject off");
-  } else if (c == 's') {
-    injectSshFail = true;
-    Log.println("QA: SSH inject FAIL");
+    } else if (c == 's') {
+    injectHealthFail = true;
+    Log.println("QA: health inject FAIL");
   } else if (c == 'S') {
-    injectSshFail = false;
-    Log.println("QA: SSH inject off");
+    injectHealthFail = false;
+    Log.println("QA: health inject off");
   } else if (c == 'w') {
     injectWifiDown = true;
     Log.println("QA: wifi inject DOWN");
@@ -165,23 +164,18 @@ static bool piPingOk() {
   return ok;
 }
 
-static bool homeAssistantUp() {
-#ifdef QA_FAST
-  if (injectHaFail) {
-    Log.println("HA: no reply (-1)");
-    return false;
-  }
-#endif
+static bool httpGetOk(const char *tag, const char *host, uint16_t port,
+                      const char *path) {
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(HTTP_TIMEOUT_MS);
   http.setReuse(false);
 
   char url[80];
-  snprintf(url, sizeof(url), "http://%s:%u%s", HA_HOST, HA_PORT, HA_PATH);
+  snprintf(url, sizeof(url), "http://%s:%u%s", host, port, path);
 
   if (!http.begin(client, url)) {
-    Log.println("HA: begin failed");
+    Log.printf("%s: begin failed\n", tag);
     return false;
   }
 
@@ -191,58 +185,36 @@ static bool homeAssistantUp() {
   http.end();
 
   if (code >= 200 && code < 400) {
-    Log.printf("HA: HTTP %d\n", code);
+    Log.printf("%s: HTTP %d\n", tag, code);
     return true;
   }
 
   if (code > 0) {
-    Log.printf("HA: unhealthy HTTP %d\n", code);
+    Log.printf("%s: unhealthy HTTP %d\n", tag, code);
   } else {
-    Log.printf("HA: no reply (%d)\n", code);
+    Log.printf("%s: no reply (%d)\n", tag, code);
   }
   return false;
 }
 
-static bool sshBannerOk() {
+static bool homeAssistantUp() {
 #ifdef QA_FAST
-  if (injectSshFail) {
-    Log.println("SSH: no banner");
+  if (injectHaFail) {
+    Log.println("HA: no reply (-1)");
     return false;
   }
 #endif
-  WiFiClient client;
-  client.setTimeout(SSH_TIMEOUT_MS);
-  if (!client.connect(SSH_HOST, SSH_PORT)) {
-    Log.println("SSH: connect fail");
+  return httpGetOk("HA", HA_HOST, HA_PORT, HA_PATH);
+}
+
+static bool hostHealthOk() {
+#ifdef QA_FAST
+  if (injectHealthFail) {
+    Log.println("Health: no reply (-1)");
     return false;
   }
-
-  char buf[96];
-  size_t n = 0;
-  buf[0] = 0;
-  const uint32_t start = millis();
-  while (millis() - start < (uint32_t)SSH_TIMEOUT_MS) {
-    esp_task_wdt_reset();
-    while (client.available()) {
-      const int c = client.read();
-      if (c < 0) {
-        break;
-      }
-      if (n + 1 < sizeof(buf)) {
-        buf[n++] = (char)c;
-        buf[n] = 0;
-      }
-      if (strstr(buf, "SSH-") != nullptr) {
-        client.stop();
-        Log.println("SSH: banner OK");
-        return true;
-      }
-    }
-    delay(20);
-  }
-  client.stop();
-  Log.println("SSH: no banner");
-  return false;
+#endif
+  return httpGetOk("Health", HEALTH_HOST, HEALTH_PORT, HEALTH_PATH);
 }
 
 static bool rebootBudgetOk() {
@@ -325,15 +297,15 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Log.println();
-  Log.println("esp32d-watchdog  ping + HA + SSH banner");
+  Log.println("esp32d-watchdog  ping + HA + host health");
 #ifdef QA_FAST
   Log.println("BUILD QA_FAST");
 #endif
   Log.printf("Ping %s every %u s, reboot after %u misses (~%u min)\n",
                 PING_HOST, CHECK_INTERVAL_MS / 1000, PING_FAIL_THRESHOLD,
                 (PING_FAIL_THRESHOLD * CHECK_INTERVAL_MS) / 60000);
-  Log.printf("HA :%u down AND SSH :%u no banner → reboot after %u misses\n",
-                HA_PORT, SSH_PORT, WEDGE_FAIL_THRESHOLD);
+  Log.printf("HA :%u down AND health :%u no HTTP → reboot after %u misses\n",
+                HA_PORT, HEALTH_PORT, WEDGE_FAIL_THRESHOLD);
   Log.println("Send t over USB to click relay 1s (test stand only)");
 
   esp_err_t wdt = esp_task_wdt_init(WDT_TIMEOUT_S, true);
@@ -391,15 +363,15 @@ void loop() {
         pingFailCount = 0;
         if (homeAssistantUp()) {
           wedgeFailCount = 0;
-        } else if (sshBannerOk()) {
+        } else if (hostHealthOk()) {
           wedgeFailCount = 0;
-          Log.println("HA down, SSH banner OK — skip reboot");
+          Log.println("HA down, host health OK — skip reboot");
         } else {
           wedgeFailCount++;
           Log.printf("Wedge miss %u / %u\n", wedgeFailCount,
                         WEDGE_FAIL_THRESHOLD);
           if (wedgeFailCount >= WEDGE_FAIL_THRESHOLD) {
-            requestReboot("HA down and SSH wedged — rebooting Pi");
+            requestReboot("HA down and host wedged — rebooting Pi");
           }
         }
       } else {

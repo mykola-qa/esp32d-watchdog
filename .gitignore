@@ -6,9 +6,12 @@
 
 # Local editor files
 .vscode/
+.cursor/
 
 # Local credentials and deployment configuration
 include/secrets.h
+LOCAL.md
+LINKEDIN.md
 
 # Python
 .pytest_cache/
