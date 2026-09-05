@@ -124,9 +124,9 @@ Logic **DC+** = ESP32 3V3. **IN** = D26. **DC−** = GND.
 ## What the firmware does
 
 Ping the configured `PING_HOST` every 15 s, pulse after ~5 min down.
-HA on the configured port down **and** host health HTTP on port 8081 down for
-~5 min → pulse.
-HA down but host health still returns HTTP 2xx/3xx (typical update) → no pulse.
+HA HTTP timeout (`-11`) for ~5 min → pulse (even if health and SSH work).
+HA connect fail + health 2xx + SSH KEXINIT: ~5 min if `ssh=0`, ~30 min if logged in.
+HA down **and** (host health fail **or** SSH KEXINIT fail) for ~5 min → pulse.
 
 ## WiFi logs (no USB)
 

@@ -4,7 +4,11 @@ An independently powered ESP32 watchdog for a Raspberry Pi running Home Assistan
 It distinguishes an unavailable service from an unresponsive host before
 interrupting the Pi's 5 V supply through a normally closed relay.
 
-The host-alive probe is an HTTP GET to a systemd canary on the Pi (`:8081`).
+The skip-reboot probes are host health HTTP (`:8081`, body `OK ssh=N` from
+remote `who` sessions) **and** SSH KEXINIT. HA HTTP **read timeout** (`-11`) is a wedge (~5 min)
+even when those probes succeed. HA connect fail (`-1`) with health and SSH up
+pulses after **~5 min** if `ssh=0`, or **~30 min** if someone is logged in
+(`ssh>=1`). A canary without `ssh=` is treated as unknown and uses 30 min.
 
 ## Architecture
 
@@ -14,6 +18,7 @@ Independent 5 V supply ── USB-C ── ESP32 ── D26 ── 3.3 V relay i
                                       ├── ICMP ping
                                       ├── Home Assistant HTTP
                                       ├── host health HTTP
+                                      ├── SSH KEXINIT
                                       └── read-only HTTP/telnet logs
 
 Pi PSU 5 V ── COM  relay  NC ── Pi 5 V
@@ -24,8 +29,11 @@ Pi PSU GND ──────────────────── Pi GND
 
 - ESP32 Wi-Fi unavailable: never reboot the Pi.
 - Pi ping unavailable for about five minutes: cut power for 10 seconds.
-- Home Assistant unavailable but the host health endpoint responds: leave the Pi running.
-- Home Assistant and host health unavailable for about five minutes: cut power.
+- Home Assistant HTTP **timeout** (`-11`): cut power after about five minutes (listener stuck).
+- Home Assistant connect fail but host health **and** SSH KEXINIT succeed: ~5 min
+  if no remote user is logged in (`ssh=0`), ~30 min with an SSH session.
+  Changing between these policies restarts the selected grace timer.
+- Home Assistant down and host health or SSH failed for about five minutes: cut power.
 - After a pulse: allow three minutes for boot and limit recovery to three attempts
   per ESP uptime hour.
 - ESP32 unpowered: relay coil releases and COM-NC keeps the Pi powered.
@@ -49,17 +57,21 @@ Requirements: PlatformIO Core 6.x or the PlatformIO IDE extension.
 cp include/secrets.h.example include/secrets.h
 ```
 
-Edit `include/secrets.h` with the Wi-Fi credentials, `HA_*`, and `HEALTH_HOST` /
-`HEALTH_PORT` (8081) / `HEALTH_PATH`. Install the Pi liveness service **before**
-flashing the ESP32. While Home Assistant is down, a missing health endpoint
-looks like a wedged host.
+Edit `include/secrets.h` with the Wi-Fi credentials, `HA_*`, `HEALTH_*`, and
+`SSH_HOST` / `SSH_PORT`. Install the Pi liveness service **before** flashing
+the ESP32. While Home Assistant is down, a missing health endpoint or a dead
+SSH daemon looks like a wedged host.
 
 ## Pi liveness endpoint
 
-A systemd service on the Pi serves HTTP on port 8081. The ESP32 treats a 2xx/3xx
-response as the host still running. Home Assistant can be down for an update
-without a reboot. If both HA and this endpoint fail for about five minutes, the
-relay pulses.
+A systemd service on the Pi serves HTTP on port 8081 and reports
+`OK ssh=N` (`N` = remote sessions from `who`; local `tty1` is ignored). An HA connect-fail with a healthy canary
+**and** SSH KEXINIT waits ~5 min if `N` is 0, ~30 min if anyone is logged in.
+If HA accepts TCP but never returns HTTP (`-11`), the relay pulses after about
+five minutes. If HA is down and health or SSH fails, also about five minutes.
+
+Bare `python3 -m http.server` only returns `OK` (no `ssh=`), so the ESP32 keeps
+the 30 min timer. Use the unit below.
 
 Copy the unit from this repo, then enable it:
 
@@ -71,11 +83,9 @@ sudo systemctl enable --now watchdog-health.service
 curl -sS http://127.0.0.1:8081/
 ```
 
-That should print `OK`. Keep port 8081 on the trusted LAN only.
-
-A dedicated directory plus `python3 -m http.server 8081` is a valid canary if
-the custom script is awkward to paste over SSH. Do not serve the filesystem
-from a home directory.
+That should print `OK ssh=0` (or `ssh=1` if you are logged in). `ssh=-1` means
+session detection failed and selects the safer 30-minute grace. Keep port 8081
+on the trusted LAN only.
 
 Then build:
 
@@ -151,7 +161,7 @@ transitions and timing from firmware logs. It does not electrically measure GPIO
 or relay contacts; verify those manually before connecting a load.
 
 Never leave the QA image on a spliced Pi 5 V cable. The skip-reboot HIL case
-needs the Pi health canary answering on port 8081.
+needs the Pi health canary on port 8081 **and** sshd answering KEXINIT.
 
 ```bash
 pip install -r tests/requirements.txt
@@ -178,8 +188,12 @@ ESP32_PORT="$ESP32_PORT" pytest -m "hardware and not qa_fast"
 | Key | Effect |
 |-----|--------|
 | f / o | ping fail on / off |
-| h / H | HA fail on / off |
+| h / H | HA connect-fail on / off |
+| u / U | HA read-timeout (-11) on / off |
 | s / S | host health fail on / off |
+| k / K | SSH KEXINIT fail on / off |
+| n / N | SSH login count 0 / 1 |
+| x / X | SSH login count unknown / live canary |
 | w / W | pretend WiFi down / off |
 | B | reset reboot budget |
 | t | 1 s relay click in Monitor (all builds, USB only) |

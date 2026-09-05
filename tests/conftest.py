@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import time
+
 import pytest
 import serial
 from serial.tools import list_ports
@@ -90,7 +91,9 @@ class WatchdogSerial:
 
     def wait_boot(self) -> None:
         self.reset_esp()
-        self.wait_for(r"esp32d-watchdog  ping \+ HA \+ host health", BOOT_TIMEOUT_S)
+        self.wait_for(
+            r"esp32d-watchdog  ping \+ HA \+ host health \+ SSH", BOOT_TIMEOUT_S
+        )
         self.is_qa_fast = any("BUILD QA_FAST" in ln for ln in self.lines)
         self.wait_for(r"State: Monitor", BOOT_TIMEOUT_S)
 
@@ -105,7 +108,10 @@ def dut(serial_port: str):
         try:
             w.send("o")
             w.send("H")
+            w.send("U")
             w.send("S")
+            w.send("K")
+            w.send("X")
             w.send("W")
         except Exception:
             pass
