@@ -135,8 +135,9 @@ release BOOT. Tap EN after upload. Monitor an already flashed board with:
 pio device monitor --port "$ESP32_PORT" -b 115200 --dtr 0 --rts 0
 ```
 
-Type a Latin `t` for a one-second test pulse. It is accepted only while the
-watchdog is in `Monitor`; do not use Ctrl+T, which opens PlatformIO's menu.
+Type a Latin `t` once for a one-second test pulse (`Monitor` only). Extra `t`
+keystrokes within five seconds are ignored so key-repeat cannot pulse the coil.
+Do not use Ctrl+T, which opens PlatformIO's menu.
 Quit with Ctrl+C.
 
 ## Read-only LAN diagnostics

@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <esp_task_wdt.h>
 
 #include "config.h"
 
@@ -20,7 +21,6 @@ LogPrint Log;
 
 static const char PAGE_HEAD[] PROGMEM =
     "<!DOCTYPE html><html><head><meta charset=utf-8>"
-    "<meta http-equiv=refresh content=10>"
     "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
     "<title>esp32d-watchdog</title>"
     "<style>body{font:14px/1.4 sans-serif;margin:1rem;background:#111;color:#ddd}"
@@ -54,6 +54,8 @@ static void sendRingHtml() {
       if (used == sizeof(chunk)) {
         web.sendContent(chunk, used);
         used = 0;
+        esp_task_wdt_reset();
+        yield();
       }
       chunk[used++] = text[i];
     }
@@ -133,6 +135,19 @@ void logRemoteBegin() {
              WiFi.localIP().toString().c_str(), LOG_TELNET_PORT);
 }
 
+void logRemoteStop() {
+  if (!started) {
+    return;
+  }
+  if (telnetClient) {
+    telnetClient.stop();
+  }
+  telnet.stop();
+  web.stop();
+  MDNS.end();
+  started = false;
+}
+
 static void acceptTelnet() {
   if (!telnet.hasClient()) {
     return;
@@ -151,6 +166,10 @@ static void acceptTelnet() {
 
 void logRemoteLoop() {
   if (!started) {
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    logRemoteStop();
     return;
   }
   acceptTelnet();

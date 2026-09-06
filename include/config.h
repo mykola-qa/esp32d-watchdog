@@ -14,7 +14,9 @@
 #define SSH_TIMEOUT_MS 4000
 #define WIFI_CONNECT_TIMEOUT_MS 20000
 #define WIFI_RETRY_MS 5000
+#define WIFI_RADIO_OFF_MS 150
 #define RELAY_TEST_PULSE_MS 1000
+#define RELAY_TEST_GUARD_MS 5000
 #define MAX_REBOOTS_PER_HOUR 3
 
 // Read-only LAN logs. Do not expose these services outside a trusted LAN.

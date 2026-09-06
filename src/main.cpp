@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
 #include <ESP32Ping.h>
+#include <esp_system.h>
 #include <esp_task_wdt.h>
 #include <cstring>
 #include <cstdlib>
@@ -28,11 +28,16 @@ static uint32_t lastCheckMs = 0;
 static uint32_t stateStartMs = 0;
 static uint32_t rebootWindowStartMs = 0;
 static uint32_t lastWifiAttemptMs = 0;
+static uint32_t wifiJoinStartMs = 0;
+static uint32_t wifiRetryAtMs = 0;
+static uint32_t lastTestClickMs = 0;
 
 static void resetHaUpdateGrace() {
   haUpdateFailCount = 0;
   haUpdatePolicy = -1;
 }
+
+static void onCommand(char c);
 
 #ifdef QA_FAST
 static bool injectPingFail = false;
@@ -67,11 +72,33 @@ static void blinkLed(uint32_t onMs, uint32_t offMs) {
   delay(offMs);
 }
 
+static void drainSerialTestKeys() {
+  while (Serial.available()) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == 't' || c == 'T' || c == '\r' || c == '\n') {
+      continue;
+    }
+#ifdef QA_FAST
+    onCommand(c);
+#else
+    (void)c;
+#endif
+  }
+}
+
 static void testRelayClick() {
   if (state != State::Monitor) {
     Log.println("TEST: ignored — relay test is only available in Monitor");
+    drainSerialTestKeys();
     return;
   }
+  if (lastTestClickMs != 0 &&
+      millis() - lastTestClickMs < RELAY_TEST_GUARD_MS) {
+    Log.println("TEST: ignored — cooldown (will not click while STA is up)");
+    drainSerialTestKeys();
+    return;
+  }
+  lastTestClickMs = millis();
   Log.printf("TEST: relay click %u ms\n", RELAY_TEST_PULSE_MS);
   relayCut();
   setLed(true);
@@ -79,6 +106,7 @@ static void testRelayClick() {
   relayIdle();
   setLed(false);
   esp_task_wdt_reset();
+  drainSerialTestKeys();
   Log.println("TEST: relay idle (click + green LED should have happened)");
 }
 
@@ -159,35 +187,79 @@ static void pollSerialTest() {
   }
 }
 
-static bool connectWifi() {
+static const char *resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:
+      return "POWERON";
+    case ESP_RST_SW:
+      return "SW";
+    case ESP_RST_PANIC:
+      return "PANIC";
+    case ESP_RST_INT_WDT:
+      return "INT_WDT";
+    case ESP_RST_TASK_WDT:
+      return "TASK_WDT";
+    case ESP_RST_WDT:
+      return "WDT";
+    case ESP_RST_BROWNOUT:
+      return "BROWNOUT";
+    default:
+      return "OTHER";
+  }
+}
+
+static void wifiRadioOff() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
+static void wifiStartJoin() {
+  wifiRadioOff();
+  delay(WIFI_RADIO_OFF_MS);
+  esp_task_wdt_reset();
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(false);
+  WiFi.setHostname(LOG_MDNS_HOST);
+  Log.printf("WiFi: connecting to %s\n", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  wifiJoinStartMs = millis();
+}
+
+static bool wifiPollJoin() {
   if (WiFi.status() == WL_CONNECTED) {
+    if (wifiJoinStartMs != 0) {
+      Log.printf("WiFi: %s  RSSI %d\n", WiFi.localIP().toString().c_str(),
+                 WiFi.RSSI());
+      wifiJoinStartMs = 0;
+    }
+    wifiRetryAtMs = 0;
     logRemoteBegin();
     return true;
   }
 
-  Log.printf("WiFi: connecting to %s\n", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-  const uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED &&
-         millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
-    pollSerialTest();
-    blinkLed(80, 220);
-    esp_task_wdt_reset();
+  const uint32_t now = millis();
+  if (wifiRetryAtMs != 0 && now < wifiRetryAtMs) {
+    return false;
   }
+  wifiRetryAtMs = 0;
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Log.println("WiFi: failed");
-    WiFi.disconnect(false);
+  if (wifiJoinStartMs == 0) {
+    wifiStartJoin();
     return false;
   }
 
-  Log.printf("WiFi: %s  RSSI %d\n", WiFi.localIP().toString().c_str(),
-             WiFi.RSSI());
-  logRemoteBegin();
-  return true;
+  if (now - wifiJoinStartMs < WIFI_CONNECT_TIMEOUT_MS) {
+    blinkLed(80, 220);
+    return false;
+  }
+
+  Log.println("WiFi: failed");
+  wifiRadioOff();
+  wifiJoinStartMs = 0;
+  wifiRetryAtMs = now + WIFI_RETRY_MS;
+  return false;
 }
 
 static bool piPingOk() {
@@ -210,32 +282,147 @@ static bool piPingOk() {
 
 enum class HaProbe : uint8_t { Up, Timeout, Down };
 
-static int httpGet(const char *tag, const char *host, uint16_t port,
-                   const char *path) {
-  WiFiClient client;
-  HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  http.setReuse(false);
-
-  char url[80];
-  snprintf(url, sizeof(url), "http://%s:%u%s", host, port, path);
-
-  if (!http.begin(client, url)) {
-    Log.printf("%s: begin failed\n", tag);
-    return -1;
+static bool waitClientData(WiFiClient &client, uint32_t deadlineMs) {
+  while (millis() < deadlineMs) {
+    esp_task_wdt_reset();
+    if (client.available()) {
+      return true;
+    }
+    if (!client.connected()) {
+      return false;
+    }
+    delay(10);
   }
+  return false;
+}
 
-  esp_task_wdt_reset();
-  const int code = http.GET();
-  esp_task_wdt_reset();
-  http.end();
+static bool readLine(WiFiClient &client, char *buf, size_t bufSize,
+                     uint32_t deadlineMs) {
+  size_t n = 0;
+  buf[0] = 0;
+  while (millis() < deadlineMs) {
+    if (!waitClientData(client, deadlineMs)) {
+      return false;
+    }
+    const int c = client.read();
+    if (c < 0) {
+      return false;
+    }
+    if (c == '\n') {
+      buf[n] = 0;
+      if (n > 0 && buf[n - 1] == '\r') {
+        buf[n - 1] = 0;
+      }
+      return true;
+    }
+    if (n + 1 < bufSize) {
+      buf[n++] = static_cast<char>(c);
+      buf[n] = 0;
+    }
+  }
+  return false;
+}
 
-  if (code >= 200 && code < 400) {
+static int parseHttpStatus(const char *line) {
+  if (strncmp(line, "HTTP/", 5) != 0) {
+    return -11;
+  }
+  const char *space = strchr(line, ' ');
+  if (space == nullptr) {
+    return -11;
+  }
+  return atoi(space + 1);
+}
+
+static const char *haProbePath() {
+  if (strcmp(HA_PATH, "/") == 0 || strcmp(HA_PATH, "/api/") == 0 ||
+      strcmp(HA_PATH, "/api") == 0) {
+    return "/manifest.json";
+  }
+  return HA_PATH;
+}
+
+static bool haCodeMeansUp(int code) {
+  return (code >= 200 && code < 400) || code == 401;
+}
+
+static void logHttpCode(const char *tag, int code, bool treat401Up) {
+  if ((code >= 200 && code < 400) || (treat401Up && code == 401)) {
     Log.printf("%s: HTTP %d\n", tag, code);
   } else if (code > 0) {
     Log.printf("%s: unhealthy HTTP %d\n", tag, code);
   } else {
     Log.printf("%s: no reply (%d)\n", tag, code);
+  }
+}
+
+static int httpGet(const char *tag, const char *host, uint16_t port,
+                   const char *path, char *body, size_t bodySize,
+                   bool treat401Up) {
+  if (body != nullptr && bodySize > 0) {
+    body[0] = 0;
+  }
+
+  WiFiClient client;
+  client.setTimeout(HTTP_TIMEOUT_MS);
+  if (!client.connect(host, port, HTTP_TIMEOUT_MS)) {
+    logHttpCode(tag, -1, treat401Up);
+    return -1;
+  }
+
+  client.print("GET ");
+  client.print(path);
+  client.print(" HTTP/1.1\r\nHost: ");
+  client.print(host);
+  client.print("\r\nConnection: close\r\n\r\n");
+  client.flush();
+
+  const uint32_t deadline = millis() + HTTP_TIMEOUT_MS;
+  char line[96];
+  if (!readLine(client, line, sizeof(line), deadline)) {
+    client.stop();
+    logHttpCode(tag, HTTPC_ERROR_READ_TIMEOUT, treat401Up);
+    return HTTPC_ERROR_READ_TIMEOUT;
+  }
+
+  const int code = parseHttpStatus(line);
+  if (code <= 0) {
+    client.stop();
+    logHttpCode(tag, HTTPC_ERROR_READ_TIMEOUT, treat401Up);
+    return HTTPC_ERROR_READ_TIMEOUT;
+  }
+
+  bool headersDone = false;
+  while (readLine(client, line, sizeof(line), deadline)) {
+    if (line[0] == 0) {
+      headersDone = true;
+      break;
+    }
+  }
+
+  if (body != nullptr && bodySize > 0 && headersDone) {
+    size_t n = 0;
+    while (n + 1 < bodySize && millis() < deadline) {
+      if (!client.available()) {
+        if (!client.connected()) {
+          break;
+        }
+        esp_task_wdt_reset();
+        delay(10);
+        continue;
+      }
+      const int c = client.read();
+      if (c < 0) {
+        break;
+      }
+      body[n++] = static_cast<char>(c);
+    }
+    body[n] = 0;
+  }
+
+  client.stop();
+  if (body == nullptr || code < 200 || code >= 400) {
+    logHttpCode(tag, code, treat401Up);
   }
   return code;
 }
@@ -251,8 +438,9 @@ static HaProbe homeAssistantProbe() {
     return HaProbe::Down;
   }
 #endif
-  const int code = httpGet("HA", HA_HOST, HA_PORT, HA_PATH);
-  if (code >= 200 && code < 400) {
+  const int code =
+      httpGet("HA", HA_HOST, HA_PORT, haProbePath(), nullptr, 0, true);
+  if (haCodeMeansUp(code)) {
     return HaProbe::Up;
   }
   if (code == HTTPC_ERROR_READ_TIMEOUT) {
@@ -271,39 +459,15 @@ static bool hostHealthOk() {
     return false;
   }
 #endif
-  WiFiClient client;
-  HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  http.setReuse(false);
-
-  char url[80];
-  snprintf(url, sizeof(url), "http://%s:%u%s", HEALTH_HOST, HEALTH_PORT,
-           HEALTH_PATH);
-
-  if (!http.begin(client, url)) {
-    Log.println("Health: begin failed");
-    return false;
-  }
-
-  esp_task_wdt_reset();
-  const int code = http.GET();
-  String body;
-  if (code > 0) {
-    body = http.getString();
-  }
-  esp_task_wdt_reset();
-  http.end();
+  char body[96];
+  const int code = httpGet("Health", HEALTH_HOST, HEALTH_PORT, HEALTH_PATH,
+                           body, sizeof(body), false);
 
   if (code < 200 || code >= 400) {
-    if (code > 0) {
-      Log.printf("Health: unhealthy HTTP %d\n", code);
-    } else {
-      Log.printf("Health: no reply (%d)\n", code);
-    }
     return false;
   }
 
-  const char *found = strstr(body.c_str(), "ssh=");
+  const char *found = strstr(body, "ssh=");
   if (found != nullptr) {
     const int n = atoi(found + 4);
     sshLoginCount = (int8_t)((n < -1) ? -1 : (n > 127 ? 127 : n));
@@ -330,7 +494,7 @@ static bool sshKexinitOk() {
 #endif
   WiFiClient client;
   client.setTimeout(SSH_TIMEOUT_MS);
-  if (!client.connect(SSH_HOST, SSH_PORT)) {
+  if (!client.connect(SSH_HOST, SSH_PORT, SSH_TIMEOUT_MS)) {
     Log.println("SSH: connect fail");
     return false;
   }
@@ -504,7 +668,11 @@ void setup() {
                 (PING_FAIL_THRESHOLD * CHECK_INTERVAL_MS) / 60000);
   Log.printf("HA timeout (-11) → reboot after %u misses; HA down + health + SSH → reboot after %u (~30 min)\n",
                 WEDGE_FAIL_THRESHOLD, HA_UPDATE_FAIL_THRESHOLD);
-  Log.println("Send t over USB to click relay 1s (test stand only)");
+  Log.printf("Reset %s  heap %u\n", resetReasonText(), ESP.getFreeHeap());
+  Log.println("Send t over USB to click relay 1s (test stand; 5 s cooldown)");
+
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
 
   esp_err_t wdt = esp_task_wdt_init(WDT_TIMEOUT_S, true);
   if (wdt != ESP_OK && wdt != ESP_ERR_INVALID_STATE) {
@@ -527,10 +695,10 @@ void loop() {
 
   switch (state) {
     case State::ConnectWifi:
-      if (connectWifi()) {
+      if (wifiPollJoin()) {
         enter(State::Monitor);
       } else {
-        delay(WIFI_RETRY_MS);
+        delay(50);
       }
       break;
 
@@ -541,12 +709,15 @@ void loop() {
 #endif
           WiFi.status() == WL_CONNECTED;
       if (!wifiUp) {
-        Log.println("WiFi lost — will not reboot Pi");
         pingFailCount = 0;
         wedgeFailCount = 0;
         resetHaUpdateGrace();
+        if (WiFi.status() != WL_CONNECTED) {
+          logRemoteStop();
+        }
         if (now - lastWifiAttemptMs >= WIFI_RETRY_MS) {
           lastWifiAttemptMs = now;
+          Log.println("WiFi lost — will not reboot Pi");
           enter(State::ConnectWifi);
         }
         break;

@@ -11,4 +11,5 @@ class LogPrint : public Print {
 extern LogPrint Log;
 
 void logRemoteBegin();
+void logRemoteStop();
 void logRemoteLoop();
