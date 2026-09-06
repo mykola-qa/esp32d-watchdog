@@ -19,7 +19,7 @@ Independent 5 V supply ── USB-C ── ESP32 ── D26 ── 3.3 V relay i
                                       ├── Home Assistant HTTP
                                       ├── host health HTTP
                                       ├── SSH KEXINIT
-                                      └── read-only HTTP/telnet logs
+                                      └── read-only telnet logs
 
 Pi PSU 5 V ── COM  relay  NC ── Pi 5 V
 Pi PSU GND ──────────────────── Pi GND
@@ -144,16 +144,15 @@ Quit with Ctrl+C.
 
 After Wi-Fi connects, the serial log prints the assigned address:
 
-- Browser: `http://<esp-ip>/` or `http://esp32-watchdog.local/`
-- Live stream: `nc <esp-ip> 23`
+- Live stream: `nc <esp-ip> 23` or `nc esp32-watchdog.local 23`
 
 LAN clients cannot trigger the relay. Manual testing is available only through
-USB serial. These services have no authentication; keep them on a trusted LAN
-and never expose them to the internet.
+USB serial. Telnet has no authentication; keep it on a trusted LAN and never
+expose port 23 to the internet.
 
-If the router still shows the ESP32 DHCP lease but ping and port 80 fail from
+If the router still shows the ESP32 DHCP lease but ping and port 23 fail from
 the LAN, tap **EN** (or `esptool --port "$ESP32_PORT" run`) before reflashing.
-A hung boot can keep the association while HTTP/telnet are dead.
+A hung boot can keep the association while telnet is dead.
 
 ## HIL tests (Python)
 
@@ -171,7 +170,7 @@ pio run -e esp32dev_qa -t upload --upload-port "$ESP32_PORT"
 ESP32_PORT="$ESP32_PORT" pytest -m hardware
 ```
 
-To include the read-only HTTP diagnostics test:
+To include the read-only telnet diagnostics test:
 
 ```bash
 ESP32_PORT="$ESP32_PORT" ESP32_IP="<esp-ip>" pytest -m hardware

@@ -14,7 +14,8 @@
 #define SSH_TIMEOUT_MS 4000
 #define WIFI_CONNECT_TIMEOUT_MS 20000
 #define WIFI_RETRY_MS 5000
-#define WIFI_RADIO_OFF_MS 150
+#define WIFI_RADIO_OFF_MS 500
+#define WIFI_LOST_DEBOUNCE_MS 3000
 #define RELAY_TEST_PULSE_MS 1000
 #define RELAY_TEST_GUARD_MS 5000
 #define MAX_REBOOTS_PER_HOUR 3
@@ -22,7 +23,6 @@
 // Read-only LAN logs. Do not expose these services outside a trusted LAN.
 #define LOG_MDNS_HOST "esp32-watchdog"
 #define LOG_TELNET_PORT 23
-#define LOG_HTTP_PORT 80
 
 #ifdef QA_FAST
 #define CHECK_INTERVAL_MS 1000

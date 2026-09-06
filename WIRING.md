@@ -132,11 +132,10 @@ HA down **and** (host health fail **or** SSH KEXINIT fail) for ~5 min → pulse.
 
 Read the assigned IP from the serial `WiFi:` line:
 
-- Browser: `http://<esp-ip>/` or `http://esp32-watchdog.local/`
 - Live stream: `nc <esp-ip> 23`
 
 LAN diagnostics are read-only and have no password. Keep them on a trusted LAN;
-never expose ports 80 or 23 to the internet. USB serial remains available for
+never expose port 23 to the internet. USB serial remains available for
 manual `t` testing and flashing.
 
 ---

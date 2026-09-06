@@ -30,6 +30,8 @@ static uint32_t rebootWindowStartMs = 0;
 static uint32_t lastWifiAttemptMs = 0;
 static uint32_t wifiJoinStartMs = 0;
 static uint32_t wifiRetryAtMs = 0;
+static uint32_t wifiDownSinceMs = 0;
+static bool wifiWaitingAuto = false;
 static uint32_t lastTestClickMs = 0;
 
 static void resetHaUpdateGrace() {
@@ -213,28 +215,32 @@ static void wifiRadioOff() {
   WiFi.mode(WIFI_OFF);
 }
 
-static void wifiStartJoin() {
-  wifiRadioOff();
-  delay(WIFI_RADIO_OFF_MS);
-  esp_task_wdt_reset();
+static void wifiStartJoin(bool resetRadio) {
+  if (resetRadio) {
+    wifiRadioOff();
+    delay(WIFI_RADIO_OFF_MS);
+    esp_task_wdt_reset();
+  }
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.setAutoReconnect(false);
+  WiFi.setAutoReconnect(true);
   WiFi.setHostname(LOG_MDNS_HOST);
   Log.printf("WiFi: connecting to %s\n", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   wifiJoinStartMs = millis();
+  wifiWaitingAuto = false;
 }
 
 static bool wifiPollJoin() {
   if (WiFi.status() == WL_CONNECTED) {
-    if (wifiJoinStartMs != 0) {
+    if (wifiJoinStartMs != 0 || wifiWaitingAuto) {
       Log.printf("WiFi: %s  RSSI %d\n", WiFi.localIP().toString().c_str(),
                  WiFi.RSSI());
-      wifiJoinStartMs = 0;
     }
+    wifiJoinStartMs = 0;
     wifiRetryAtMs = 0;
+    wifiWaitingAuto = false;
     logRemoteBegin();
     return true;
   }
@@ -245,8 +251,18 @@ static bool wifiPollJoin() {
   }
   wifiRetryAtMs = 0;
 
+  if (wifiWaitingAuto) {
+    if (now - wifiJoinStartMs < WIFI_CONNECT_TIMEOUT_MS) {
+      blinkLed(80, 220);
+      return false;
+    }
+    Log.println("WiFi: auto-reconnect failed");
+    wifiStartJoin(true);
+    return false;
+  }
+
   if (wifiJoinStartMs == 0) {
-    wifiStartJoin();
+    wifiStartJoin(false);
     return false;
   }
 
@@ -621,13 +637,14 @@ static void enter(State next) {
       Log.println("State: Monitor");
       break;
     case State::PulseRelay:
-      Log.println("State: PulseRelay — cutting Pi 4B power");
+      Log.printf("State: PulseRelay — Pi 5 V off for %u s\n",
+                 RELAY_PULSE_MS / 1000);
       relayCut();
       setLed(true);
       break;
     case State::Cooldown:
-      Log.printf("State: Cooldown %u s for Pi boot\n",
-                    POST_REBOOT_COOLDOWN_MS / 1000);
+      Log.printf("State: Cooldown — 5 V restored, waiting %u s for Pi boot\n",
+                 POST_REBOOT_COOLDOWN_MS / 1000);
       relayIdle();
       setLed(false);
       break;
@@ -672,7 +689,7 @@ void setup() {
   Log.println("Send t over USB to click relay 1s (test stand; 5 s cooldown)");
 
   WiFi.persistent(false);
-  WiFi.setAutoReconnect(false);
+  WiFi.setAutoReconnect(true);
 
   esp_err_t wdt = esp_task_wdt_init(WDT_TIMEOUT_S, true);
   if (wdt != ESP_OK && wdt != ESP_ERR_INVALID_STATE) {
@@ -714,14 +731,27 @@ void loop() {
         resetHaUpdateGrace();
         if (WiFi.status() != WL_CONNECTED) {
           logRemoteStop();
+          if (wifiDownSinceMs == 0) {
+            wifiDownSinceMs = now;
+          }
+          if (now - wifiDownSinceMs < WIFI_LOST_DEBOUNCE_MS) {
+            break;
+          }
+        } else {
+          wifiDownSinceMs = 0;
         }
         if (now - lastWifiAttemptMs >= WIFI_RETRY_MS) {
           lastWifiAttemptMs = now;
           Log.println("WiFi lost — will not reboot Pi");
+          if (WiFi.status() != WL_CONNECTED) {
+            wifiWaitingAuto = true;
+            wifiJoinStartMs = now;
+          }
           enter(State::ConnectWifi);
         }
         break;
       }
+      wifiDownSinceMs = 0;
 
       if (lastCheckMs != 0 && now - lastCheckMs < CHECK_INTERVAL_MS) {
         delay(50);
